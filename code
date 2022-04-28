@@ -1,0 +1,66 @@
+from fastNLP.io import ChnSentiCorpLoader
+from fastNLP.io import ChnSentiCorpPipe
+from torch import nn
+from fastNLP.modules import LSTM
+import torch
+from fastNLP.embeddings import BertEmbedding
+from fastNLP import Trainer
+from fastNLP import CrossEntropyLoss
+from torch.optim import Adam
+from fastNLP import AccuracyMetric
+import time
+from fastNLP import Tester
+
+# 读取数据集，分为训练集、验证集、测试集
+loader = ChnSentiCorpLoader()  # 初始化一个中文情感分类的loader
+data_bundle = loader.load('/home/chen/Documents/AIProject/LiXuan/data/weibo')  # 读取数据
+
+# 数据预处理，对文本进行分字，然后将其与标签转化为字典
+pipe = ChnSentiCorpPipe()
+data_bundle = pipe.process(data_bundle)  # 所有的Pipe都实现了process()方法，且输入输出都为DataBundle类型
+print(data_bundle)  # 打印data_bundle，查看其变化
+
+# 选择预训练模型
+bert_embed = BertEmbedding(char_vocab, model_dir_or_name='cn', auto_truncate=True, requires_grad=False)
+
+# 定义模型
+class BERT_BiLSTM(nn.Module):
+    def __init__(self, embed, num_classes, hidden_size=400, num_layers=1, dropout=0.3):
+        super().__init__()
+        self.embed = embed
+
+        self.lstm = LSTM(self.embed.embedding_dim, hidden_size=hidden_size // 2, num_layers=num_layers,
+                         batch_first=True, bidirectional=True)
+        self.dropout_layer = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, chars, seq_len):  # 这里的名称必须和DataSet中相应的field对应，比如之前我们DataSet中有chars，这里就必须为chars
+        # chars:[batch_size, max_len]
+        # seq_len: [batch_size, ]
+        chars = self.embed(chars)
+        outputs, _ = self.lstm(chars, seq_len)
+        outputs = self.dropout_layer(outputs)
+        outputs, _ = torch.max(outputs, dim=1)
+        outputs = self.fc(outputs)
+
+        return {'pred': outputs}  # [batch_size,], 返回值必须是dict类型，且预测值的key建议设为pred
+
+# 初始化模型
+model = BERT_BiLSTM(bert_embed, len(data_bundle.get_vocab('target')))
+print(model)  # 打印模型结构
+# 训练模型
+loss = CrossEntropyLoss()
+optimizer = Adam(model.parameters(), lr=0.001)
+metric = AccuracyMetric()
+device = 1   # 选择第二张显卡
+trainer = Trainer(train_data=data_bundle.get_dataset('train'), model=model, loss=loss,
+                  optimizer=optimizer, batch_size=32, dev_data=data_bundle.get_dataset('dev'),
+                  metrics=metric, device=device)
+time_start = time.time()
+trainer.train()  # 开始训练
+time_close = time.time()
+print('训练耗时:{}'.format(time_close - time_start))
+
+# 开始测试
+tester = Tester(data=data_bundle.get_dataset('test'), model=model, metrics=metric, batch_size=64, device=device)
+tester.test()
